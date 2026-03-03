@@ -161,7 +161,7 @@ def index():
                 errors["general"] = str(e)
 
     return render_template(
-        "index_modern.html",
+        "index.html",
         stock=stock,
         bond=bond,
         gold=gold,
