@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="https://cdn.datatables.net/1.13.5/css/dataTables.bootstrap5.min.css">
 
 <style>
+
 body {
   font-family: 'Montserrat', sans-serif;
   background: linear-gradient(135deg, #0f111a, #1a1c2d);
@@ -92,7 +93,6 @@ small {
   border-radius:12px;
   padding:10px;
   border: 1px solid rgba(0,0,0,0.2);
-  box-shadow: 0 6px 15px rgba(0,0,0,0.3);
 }
 
 .dataframe table {
@@ -122,6 +122,11 @@ small {
   font-weight:bold;
 }
 
+.currency-box{
+  font-size:18px;
+  text-align:center;
+}
+
 ul {
   list-style:none;
   padding-left:0;
@@ -135,6 +140,7 @@ ul li {
   border:1px solid rgba(0,255,255,0.2);
   text-align:center;
 }
+
 </style>
 </head>
 
@@ -190,16 +196,33 @@ ul li {
 </div>
 
 <h4>Strategy Results</h4>
+
 <div class="strategy-table glass-panel">
+
 <table class="table table-striped">
-<tr><th>Strategy</th><th>Final Value</th></tr>
+
+<tr>
+<th>Strategy</th>
+<th>Final Value (USD)</th>
+<th>Final Value (HUF)</th>
+</tr>
+
 {% for k,v in results.strategies.items() %}
-<tr><td>{{k}}</td><td>{{v}}</td></tr>
+
+<tr>
+<td>{{k}}</td>
+<td>{{v}}</td>
+<td>{{ (v * results.usd_huf) | round(0) }}</td>
+</tr>
+
 {% endfor %}
+
 </table>
+
 </div>
 
 <h4>Current Prices</h4>
+
 <ul class="glass-panel">
 <li>Stock: {{results.stock_price}}</li>
 <li>Bond: {{results.bond_price}}</li>
@@ -207,12 +230,16 @@ ul li {
 </ul>
 
 <h4>Currency Rates</h4>
-<ul class="glass-panel">
-<li>EUR / HUF: {{results.eur_huf}}</li>
-<li>USD / HUF: {{results.usd_huf}}</li>
-</ul>
+
+<div class="glass-panel currency-box">
+
+1 EUR = <b>{{results.eur_huf}}</b> HUF<br>
+1 USD = <b>{{results.usd_huf}}</b> HUF
+
+</div>
 
 <h4>Last 24 Months Data</h4>
+
 <div class="dataframe glass-panel">
 {{results.table|safe}}
 </div>
@@ -231,6 +258,7 @@ ul li {
 <script src="https://cdn.datatables.net/1.13.5/js/jquery.dataTables.min.js"></script>
 
 <script>
+
 $(document).ready(function() {
 
 var table = $('.dataframe table').DataTable({
@@ -242,14 +270,24 @@ var table = $('.dataframe table').DataTable({
 });
 
 table.rows().every(function() {
+
     var data = this.data();
     var position = data[data.length - 1];
+
     if(position !== "STOCK"){
         $(this.node()).addClass('non-stock-row');
     }
+
 });
 
 });
+
+// AUTO REFRESH 60s
+
+setTimeout(function(){
+   location.reload();
+},60000);
+
 </script>
 
 </body>
