@@ -1,12 +1,10 @@
-from flask import Flask, render_template, request, redirect, url_for, session
+from flask import Flask, render_template, request
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
-import requests
 import os
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)  # session biztonságos kezelése
 
 # ----- Defaults -----
 DEFAULT_STOCK = "CSPX.AS"
@@ -18,6 +16,7 @@ INITIAL_CAPITAL = 100000
 # ------------------ Helper functions ------------------
 
 def validate_ticker(ticker):
+    """Ellenőrzi, hogy a ticker létezik és van hozzá havi adat."""
     try:
         t = yf.Ticker(ticker)
         info = t.history(period="1mo")
@@ -26,6 +25,7 @@ def validate_ticker(ticker):
         return False
 
 def download_monthly(ticker, start_date):
+    """Letölti a havi záróár adatokat 50 évre."""
     data = yf.download(
         ticker,
         start=start_date,
@@ -43,18 +43,27 @@ def download_monthly(ticker, start_date):
     return data["Close"].dropna()
 
 def build_dataframe(stock, bond, gold, ma_months):
+    """Készít DataFrame-et, shifteli a záróárakat 1 hónappal vissza."""
     df = pd.concat([stock, bond, gold], axis=1, join="inner")
     df.columns = ["Stock close", "Bond close", "Gold close"]
+
+    # Shift: a hónap első napjához az előző havi záróár
     df[["Stock close", "Bond close", "Gold close"]] = df[["Stock close", "Bond close", "Gold close"]].shift(1)
+
+    # Mozgóátlagok
     df["Stock MA"] = df["Stock close"].rolling(ma_months).mean()
     df["Bond MA"] = df["Bond close"].rolling(ma_months).mean()
     df["Gold MA"] = df["Gold close"].rolling(ma_months).mean()
+
+    # Signal
     df["Signal"] = "STOCK"
     df.loc[df["Stock close"] < df["Stock MA"], "Signal"] = "DEFENSIVE"
+
     df = df.dropna()
     return df
 
 def simulate_strategy(df, mode):
+    """Számolja a stratégiákhoz tartozó végső értéket."""
     capital = INITIAL_CAPITAL
     for i in range(1, len(df)):
         prev = df.iloc[i-1]
@@ -75,6 +84,7 @@ def simulate_strategy(df, mode):
     return round(capital,2)
 
 def get_daily_close(ticker):
+    """Lekéri a napi záróárat."""
     data = yf.download(
         ticker,
         period="5d",
@@ -88,11 +98,13 @@ def get_daily_close(ticker):
     return float(data["Close"].dropna().iloc[-1])
 
 def get_fx_rates():
-    """Lekéri az EUR/HUF és USD/HUF árfolyamot (fixing vagy Yahoo)."""
+    """Lekéri az EUR/HUF és USD/HUF árfolyamot (Yahoo Finance)."""
     try:
-        eur = yf.download("EURHUF=X", period="1d", interval="1d", progress=False)["Close"].iloc[-1]
-        usd = yf.download("USDHUF=X", period="1d", interval="1d", progress=False)["Close"].iloc[-1]
-        return round(eur,2), round(usd,2)
+        eur_series = yf.download("EURHUF=X", period="1d", interval="1d", progress=False)["Close"]
+        usd_series = yf.download("USDHUF=X", period="1d", interval="1d", progress=False)["Close"]
+        eur = round(eur_series.iloc[-1].item(), 2)
+        usd = round(usd_series.iloc[-1].item(), 2)
+        return eur, usd
     except:
         return None, None
 
@@ -103,65 +115,64 @@ def index():
     errors = {}
     results = None
 
+    stock = DEFAULT_STOCK
+    bond = DEFAULT_BOND
+    gold = DEFAULT_GOLD
+    ma = DEFAULT_MA
+
     if request.method=="POST":
-        # --- POST → store in session and redirect (PRG) ---
-        session["form_data"] = {
-            "stock": request.form.get("stock") or DEFAULT_STOCK,
-            "bond": request.form.get("bond") or DEFAULT_BOND,
-            "gold": request.form.get("gold") or DEFAULT_GOLD,
-            "ma": request.form.get("ma") or DEFAULT_MA
-        }
-        return redirect(url_for("index"))
-
-    # --- GET ---
-    form_data = session.pop("form_data", None)
-    stock = form_data.get("stock", DEFAULT_STOCK) if form_data else DEFAULT_STOCK
-    bond = form_data.get("bond", DEFAULT_BOND) if form_data else DEFAULT_BOND
-    gold = form_data.get("gold", DEFAULT_GOLD) if form_data else DEFAULT_GOLD
-    try:
-        ma = int(form_data.get("ma", DEFAULT_MA)) if form_data else DEFAULT_MA
-        if ma <= 0: raise ValueError
-    except ValueError:
-        ma = DEFAULT_MA
-        errors["ma"] = "MA months must be positive"
-
-    # Validate tickers
-    for ticker,name in zip([stock,bond,gold],["stock","bond","gold"]):
-        if not validate_ticker(ticker):
-            errors[name] = "Invalid or unsupported ticker"
-
-    if not errors:
+        stock = request.form.get("stock") or DEFAULT_STOCK
+        bond = request.form.get("bond") or DEFAULT_BOND
+        gold = request.form.get("gold") or DEFAULT_GOLD
         try:
-            start_date = datetime.now() - timedelta(days=50*365)
-            stock_data = download_monthly(stock, start_date)
-            bond_data = download_monthly(bond, start_date)
-            gold_data = download_monthly(gold, start_date)
-            df = build_dataframe(stock_data, bond_data, gold_data, ma)
-            current_signal = df.iloc[-1]["Signal"]
-            current_position = stock if current_signal=="STOCK" else f"{bond} or {gold}"
-            strategies = {
-                "Stock → Bond": simulate_strategy(df,"stock_bond"),
-                "Stock → Gold": simulate_strategy(df,"stock_gold"),
-                "Stock Only": simulate_strategy(df,"stock_only"),
-                "Bond Only": simulate_strategy(df,"bond_only"),
-                "Gold Only": simulate_strategy(df,"gold_only"),
-            }
-            last_24 = df.tail(24).round(2)
-            eur_huf, usd_huf = get_fx_rates()
-            results = {
-                "strategies": strategies,
-                "stock_price": round(get_daily_close(stock),2),
-                "bond_price": round(get_daily_close(bond),2),
-                "gold_price": round(get_daily_close(gold),2),
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "current_position": current_position,
-                "signal": current_signal,
-                "table": last_24.to_html(classes="table table-striped table-sm dataframe", border=0),
-                "eur_huf": eur_huf,
-                "usd_huf": usd_huf
-            }
-        except Exception as e:
-            errors["general"] = str(e)
+            ma = int(request.form.get("ma") or DEFAULT_MA)
+            if ma <= 0: raise ValueError
+        except ValueError:
+            errors["ma"] = "MA months must be positive"
+
+        for ticker,name in zip([stock,bond,gold],["stock","bond","gold"]):
+            if not validate_ticker(ticker):
+                errors[name] = "Invalid or unsupported ticker"
+
+        if not errors:
+            try:
+                start_date = datetime.now() - timedelta(days=50*365)
+                stock_data = download_monthly(stock, start_date)
+                bond_data = download_monthly(bond, start_date)
+                gold_data = download_monthly(gold, start_date)
+
+                df = build_dataframe(stock_data, bond_data, gold_data, ma)
+
+                current_signal = df.iloc[-1]["Signal"]
+                current_position = stock if current_signal=="STOCK" else f"{bond} or {gold}"
+
+                strategies = {
+                    "Stock → Bond": simulate_strategy(df,"stock_bond"),
+                    "Stock → Gold": simulate_strategy(df,"stock_gold"),
+                    "Stock Only": simulate_strategy(df,"stock_only"),
+                    "Bond Only": simulate_strategy(df,"bond_only"),
+                    "Gold Only": simulate_strategy(df,"gold_only"),
+                }
+
+                last_24 = df.tail(24).round(2)
+
+                eur_huf, usd_huf = get_fx_rates()
+
+                results = {
+                    "strategies": strategies,
+                    "stock_price": round(get_daily_close(stock),2),
+                    "bond_price": round(get_daily_close(bond),2),
+                    "gold_price": round(get_daily_close(gold),2),
+                    "eur_huf": eur_huf,
+                    "usd_huf": usd_huf,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "current_position": current_position,
+                    "signal": current_signal,
+                    "table": last_24.to_html(classes="table table-striped table-sm dataframe", border=0)
+                }
+
+            except Exception as e:
+                errors["general"] = str(e)
 
     return render_template(
         "index.html",
