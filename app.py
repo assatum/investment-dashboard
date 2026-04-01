@@ -59,7 +59,7 @@ def download_monthly_with_fallback(ticker, start_date):
     has_last_month = False
     if not monthly_series.empty:
         last_date = monthly_series.index[-1].date()
-        if last_date >= pd.Timestamp(last_month_end):
+        if last_date.month == last_month_end.month and last_date.year == last_month_end.year:
             has_last_month = True
 
     # ---- 3. Ha nincs → fallback daily ----
