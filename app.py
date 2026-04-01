@@ -2,6 +2,7 @@ from flask import Flask, render_template, request
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
+import os
 
 app = Flask(__name__)
 
@@ -12,24 +13,28 @@ DEFAULT_GOLD = "4GLD.DE"
 DEFAULT_MA = 12
 INITIAL_CAPITAL = 100000
 
+
 # ------------------ Helper functions ------------------
 
 def validate_ticker(ticker):
-    """Ellenőrzi, hogy a ticker létezik és van hozzá havi adat."""
     try:
         t = yf.Ticker(ticker)
-        info = t.history(period="1mo")
+        info = t.history(period="5d")
         return not info.empty
     except:
         return False
 
 
 def download_monthly(ticker, start_date):
-    """Letölti a havi záróár adatokat 50 évre."""
+    """
+    Mindig napi adatból számol havi zárót.
+    Ez garantálja, hogy március 31 már április 1-én látszik.
+    """
+
     data = yf.download(
         ticker,
         start=start_date,
-        interval="1mo",
+        interval="1d",
         auto_adjust=True,
         progress=False,
         threads=False
@@ -44,11 +49,13 @@ def download_monthly(ticker, start_date):
     if "Close" not in data.columns:
         raise ValueError(f"No valid price data for {ticker}")
 
-    return data["Close"].dropna()
+    # ---- HAVI ZÁRÓ ----
+    monthly = data["Close"].resample("ME").last()
+
+    return monthly.dropna()
 
 
 def get_fx_rate(pair):
-    """Deviza árfolyam lekérése (pl. EURHUF=X)."""
     data = yf.download(
         pair,
         period="5d",
@@ -67,21 +74,19 @@ def get_fx_rate(pair):
 # ------------------ Data processing ------------------
 
 def build_dataframe(stock, bond, gold, ma_months):
-    """Készít DataFrame-et, shifteli a záróárakat 1 hónappal vissza."""
+
     df = pd.concat([stock, bond, gold], axis=1, join="inner")
     df.columns = ["Stock close", "Bond close", "Gold close"]
 
-    # Shift: a hónap első napjához az előző havi záróár
+    # ---- SHIFT (no lookahead) ----
     df[["Stock close", "Bond close", "Gold close"]] = df[
         ["Stock close", "Bond close", "Gold close"]
     ].shift(1)
 
-    # Mozgóátlagok
     df["Stock MA"] = df["Stock close"].rolling(ma_months).mean()
     df["Bond MA"] = df["Bond close"].rolling(ma_months).mean()
     df["Gold MA"] = df["Gold close"].rolling(ma_months).mean()
 
-    # Signal
     df["Signal"] = "STOCK"
     df.loc[df["Stock close"] < df["Stock MA"], "Signal"] = "DEFENSIVE"
 
@@ -91,7 +96,7 @@ def build_dataframe(stock, bond, gold, ma_months):
 
 
 def simulate_strategy(df, mode):
-    """Számolja a stratégiákhoz tartozó végső értéket."""
+
     capital = INITIAL_CAPITAL
 
     for i in range(1, len(df)):
@@ -127,7 +132,6 @@ def simulate_strategy(df, mode):
 
 
 def get_daily_close(ticker):
-    """Lekéri a napi záróárat."""
     data = yf.download(
         ticker,
         period="5d",
@@ -156,18 +160,19 @@ def index():
     gold = DEFAULT_GOLD
     ma = DEFAULT_MA
 
-    if request.method == "POST":
+    # 👉 FONTOS: GET-re is fusson!
+    run_calc = request.method in ["GET", "POST"]
 
-        stock = request.form.get("stock") or DEFAULT_STOCK
-        bond = request.form.get("bond") or DEFAULT_BOND
-        gold = request.form.get("gold") or DEFAULT_GOLD
+    if run_calc:
+
+        stock = request.form.get("stock") or stock
+        bond = request.form.get("bond") or bond
+        gold = request.form.get("gold") or gold
 
         try:
-            ma = int(request.form.get("ma") or DEFAULT_MA)
-
+            ma = int(request.form.get("ma") or ma)
             if ma <= 0:
                 raise ValueError
-
         except ValueError:
             errors["ma"] = "MA months must be positive"
 
@@ -175,9 +180,8 @@ def index():
             [stock, bond, gold],
             ["stock", "bond", "gold"]
         ):
-
             if not validate_ticker(ticker):
-                errors[name] = "Invalid or unsupported ticker"
+                errors[name] = "Invalid ticker"
 
         if not errors:
 
@@ -209,8 +213,6 @@ def index():
 
                 last_24 = df.tail(24).round(2)
 
-                # ---- FX árfolyamok ----
-
                 eur_huf = round(get_fx_rate("EURHUF=X"), 2)
                 usd_huf = round(get_fx_rate("USDHUF=X"), 2)
 
@@ -231,7 +233,6 @@ def index():
                 }
 
             except Exception as e:
-
                 errors["general"] = str(e)
 
     return render_template(
@@ -249,7 +250,7 @@ def index():
     )
 
 
-import os
+# ------------------ RUN ------------------
 
 if __name__ == "__main__":
 
