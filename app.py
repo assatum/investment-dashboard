@@ -2,6 +2,7 @@ from flask import Flask, render_template, request
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
+import os
 
 app = Flask(__name__)
 
@@ -12,10 +13,10 @@ DEFAULT_GOLD = "4GLD.DE"
 DEFAULT_MA = 12
 INITIAL_CAPITAL = 100000
 
+
 # ------------------ Helper functions ------------------
 
 def validate_ticker(ticker):
-    """Ellenőrzi, hogy a ticker létezik és van hozzá havi adat."""
     try:
         t = yf.Ticker(ticker)
         info = t.history(period="1mo")
@@ -24,9 +25,14 @@ def validate_ticker(ticker):
         return False
 
 
-def download_monthly(ticker, start_date):
-    """Letölti a havi záróár adatokat 50 évre."""
-    data = yf.download(
+def download_monthly_with_fallback(ticker, start_date):
+    """
+    1) Próbál Yahoo havi adatot
+    2) Ha nem tartalmazza az utolsó lezárt hónapot → fallback napi → resample
+    """
+
+    # ---- 1. Yahoo monthly ----
+    monthly = yf.download(
         ticker,
         start=start_date,
         interval="1mo",
@@ -35,20 +41,54 @@ def download_monthly(ticker, start_date):
         threads=False
     )
 
-    if data.empty:
-        raise ValueError(f"No historical data for {ticker}")
+    if not monthly.empty:
+        if isinstance(monthly.columns, pd.MultiIndex):
+            monthly.columns = monthly.columns.get_level_values(0)
 
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
+        if "Close" in monthly.columns:
+            monthly_series = monthly["Close"].dropna()
+        else:
+            monthly_series = pd.Series(dtype=float)
+    else:
+        monthly_series = pd.Series(dtype=float)
 
-    if "Close" not in data.columns:
-        raise ValueError(f"No valid price data for {ticker}")
+    # ---- 2. Ellenőrizzük: benne van-e a legutóbbi lezárt hónap ----
+    today = datetime.now()
+    last_month_end = (today.replace(day=1) - timedelta(days=1)).date()
 
-    return data["Close"].dropna()
+    has_last_month = False
+    if not monthly_series.empty:
+        last_date = monthly_series.index[-1].date()
+        if last_date.month == last_month_end.month and last_date.year == last_month_end.year:
+            has_last_month = True
+
+    # ---- 3. Ha nincs → fallback daily ----
+    if not has_last_month:
+
+        daily = yf.download(
+            ticker,
+            start=start_date,
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            threads=False
+        )
+
+        if daily.empty:
+            raise ValueError(f"No historical data for {ticker}")
+
+        if isinstance(daily.columns, pd.MultiIndex):
+            daily.columns = daily.columns.get_level_values(0)
+
+        if "Close" not in daily.columns:
+            raise ValueError(f"No valid price data for {ticker}")
+
+        monthly_series = daily["Close"].resample("ME").last().dropna()
+
+    return monthly_series
 
 
 def get_fx_rate(pair):
-    """Deviza árfolyam lekérése (pl. EURHUF=X)."""
     data = yf.download(
         pair,
         period="5d",
@@ -67,21 +107,19 @@ def get_fx_rate(pair):
 # ------------------ Data processing ------------------
 
 def build_dataframe(stock, bond, gold, ma_months):
-    """Készít DataFrame-et, shifteli a záróárakat 1 hónappal vissza."""
+
     df = pd.concat([stock, bond, gold], axis=1, join="inner")
     df.columns = ["Stock close", "Bond close", "Gold close"]
 
-    # Shift: a hónap első napjához az előző havi záróár
+    # SHIFT (NO LOOKAHEAD!)
     df[["Stock close", "Bond close", "Gold close"]] = df[
         ["Stock close", "Bond close", "Gold close"]
     ].shift(1)
 
-    # Mozgóátlagok
     df["Stock MA"] = df["Stock close"].rolling(ma_months).mean()
     df["Bond MA"] = df["Bond close"].rolling(ma_months).mean()
     df["Gold MA"] = df["Gold close"].rolling(ma_months).mean()
 
-    # Signal
     df["Signal"] = "STOCK"
     df.loc[df["Stock close"] < df["Stock MA"], "Signal"] = "DEFENSIVE"
 
@@ -91,7 +129,7 @@ def build_dataframe(stock, bond, gold, ma_months):
 
 
 def simulate_strategy(df, mode):
-    """Számolja a stratégiákhoz tartozó végső értéket."""
+
     capital = INITIAL_CAPITAL
 
     for i in range(1, len(df)):
@@ -127,7 +165,6 @@ def simulate_strategy(df, mode):
 
 
 def get_daily_close(ticker):
-    """Lekéri a napi záróárat."""
     data = yf.download(
         ticker,
         period="5d",
@@ -164,10 +201,8 @@ def index():
 
         try:
             ma = int(request.form.get("ma") or DEFAULT_MA)
-
             if ma <= 0:
                 raise ValueError
-
         except ValueError:
             errors["ma"] = "MA months must be positive"
 
@@ -175,7 +210,6 @@ def index():
             [stock, bond, gold],
             ["stock", "bond", "gold"]
         ):
-
             if not validate_ticker(ticker):
                 errors[name] = "Invalid or unsupported ticker"
 
@@ -185,9 +219,9 @@ def index():
 
                 start_date = datetime.now() - timedelta(days=50 * 365)
 
-                stock_data = download_monthly(stock, start_date)
-                bond_data = download_monthly(bond, start_date)
-                gold_data = download_monthly(gold, start_date)
+                stock_data = download_monthly_with_fallback(stock, start_date)
+                bond_data = download_monthly_with_fallback(bond, start_date)
+                gold_data = download_monthly_with_fallback(gold, start_date)
 
                 df = build_dataframe(stock_data, bond_data, gold_data, ma)
 
@@ -209,8 +243,6 @@ def index():
 
                 last_24 = df.tail(24).round(2)
 
-                # ---- FX árfolyamok ----
-
                 eur_huf = round(get_fx_rate("EURHUF=X"), 2)
                 usd_huf = round(get_fx_rate("USDHUF=X"), 2)
 
@@ -231,7 +263,6 @@ def index():
                 }
 
             except Exception as e:
-
                 errors["general"] = str(e)
 
     return render_template(
@@ -249,7 +280,7 @@ def index():
     )
 
 
-import os
+# ------------------ RUN ------------------
 
 if __name__ == "__main__":
 
